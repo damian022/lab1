@@ -1,121 +1,88 @@
-import pyshark
-import string
-import nltk
-from nltk.corpus import words
+import os
+from scapy.all import rdpcap, ICMP
+from collections import Counter
+from colorama import Fore, Style
 
-# Asegúrate de haber descargado el diccionario de palabras en español
-nltk.download('words')
-
-def cargar_diccionario_espanol():
-    """
-    Carga un diccionario de palabras en español para la evaluación de las secuencias generadas.
-    """
-    # Lista de palabras en español en minúsculas
-    with open('palabras_espanol.txt', 'r', encoding='utf-8') as file:
-        return set(word.strip().lower() for word in file.readlines())
-
-def reconstruir_mensaje(pcap_file):
-    """
-    Procesa un archivo .pcapng, extrae el segundo carácter de los paquetes ICMP de tipo Echo Request
-    y reconstruye el mensaje transmitido, generando todas las combinaciones posibles basadas
-    en un desplazamiento desconocido.
-    """
-    # Abrir y analizar el archivo de captura .pcapng
+def leer_captura(nombre_archivo):
+    """Lee un archivo .pcapng y devuelve una lista de paquetes ICMP Echo Request válidos."""
+    if not os.path.exists(nombre_archivo):
+        raise FileNotFoundError(f"Archivo no encontrado: {nombre_archivo}")
+    
     try:
-        captura = pyshark.FileCapture(pcap_file, display_filter="icmp.type == 8")
+        paquetes = rdpcap(nombre_archivo)
     except Exception as e:
-        print(f"Error al abrir el archivo de captura: {e}")
-        return []
+        raise IOError(f"Error al leer el archivo: {e}")
+    
+    echo_requests = []
+    for pkt in paquetes:
+        if pkt.haslayer(ICMP) and pkt[ICMP].type == 8:  # Echo Request
+            raw_data = bytes(pkt[ICMP].payload)
+            if len(raw_data) >= 2:
+                echo_requests.append(raw_data[1:2].decode(errors='ignore'))  # Segundo carácter
+    return echo_requests
 
-    # Extraer los caracteres del segundo campo de data en los paquetes ICMP tipo Echo Request
-    caracteres_extraidos = []
-    for paquete in captura:
-        try:
-            # Extraemos el campo "data" del paquete y tomamos el segundo carácter
-            data = paquete.icmp.data
-            if len(data) > 1:
-                caracteres_extraidos.append(data[1])  # Segundo carácter
-        except AttributeError:
-            # Si el paquete no contiene el campo data, lo ignoramos
-            continue
-
-    return caracteres_extraidos
-
-def generar_combinaciones(mensaje):
-    """
-    Genera todas las combinaciones posibles de un mensaje dado, asumiendo que puede haber un desplazamiento
-    desconocido en el texto original.
-    """
-    # Desplazamientos posibles (de 0 a 25 para las letras)
-    combinaciones = []
-    for desplazamiento in range(26):
-        combinacion = ''.join(
-            chr(((ord(c) - ord('a') + desplazamiento) % 26) + ord('a')) if c.islower() else
-            chr(((ord(c) - ord('A') + desplazamiento) % 26) + ord('A')) if c.isupper() else c
-            for c in mensaje
-        )
-        combinaciones.append(combinacion)
-    return combinaciones
-
-def evaluar_mensaje(mensaje, diccionario):
-    """
-    Evalúa la probabilidad de que una secuencia de caracteres sea un mensaje válido en español
-    basado en la cantidad de palabras válidas encontradas.
-    """
-    palabras_validas = sum(1 for palabra in mensaje.split() if palabra in diccionario)
-    return palabras_validas
-
-def mostrar_resultados(combinaciones, diccionario):
-    """
-    Muestra todas las combinaciones posibles de mensajes y resalta el más probable
-    basándose en la evaluación con el diccionario de palabras en español.
-    """
-    mejor_combinacion = None
-    max_palabras_validas = -1
-
-    for combinacion in combinaciones:
-        palabras_validas = evaluar_mensaje(combinacion, diccionario)
-        if palabras_validas > max_palabras_validas:
-            max_palabras_validas = palabras_validas
-            mejor_combinacion = combinacion
-
-    # Imprimir todas las combinaciones generadas
-    print("Combinaciones posibles de mensajes:")
-    for combinacion in combinaciones:
-        if combinacion == mejor_combinacion:
-            print(f"\033[92m{combinacion}\033[0m")  # Resalta el mensaje más probable en verde
+def cifrado_cesar(texto, desplazamiento):
+    """Aplica un cifrado César inverso (decodificación) con un desplazamiento dado."""
+    resultado = ""
+    for char in texto:
+        if char.isalpha():
+            base = ord('A') if char.isupper() else ord('a')
+            resultado += chr((ord(char) - base - desplazamiento) % 26 + base)
         else:
-            print(combinacion)
+            resultado += char
+    return resultado
+
+def generar_combinaciones(texto):
+    """Genera 25 combinaciones de cifrado César posibles del texto."""
+    return [(i, cifrado_cesar(texto, i)) for i in range(1, 26)]
+
+def puntuacion_vocales(texto):
+    """Calcula una puntuación basada en la frecuencia de las vocales en español."""
+    texto = texto.lower()
+    contador = Counter(texto)
+    puntuacion = (
+        contador.get('a', 0) * 0.25 +
+        contador.get('e', 0) * 0.35 +
+        contador.get('o', 0) * 0.2 +
+        contador.get('i', 0) * 0.15 +
+        contador.get('u', 0) * 0.05
+    )
+    return puntuacion
+
+def encontrar_mas_probable(combinaciones):
+    """Determina la combinación más probable según el análisis de frecuencia de vocales."""
+    mejor = max(combinaciones, key=lambda x: puntuacion_vocales(x[1]))
+    return mejor
 
 def main():
-    """
-    Función principal que coordina el flujo del programa.
-    """
-    # Pedir al usuario el nombre del archivo .pcapng
-    archivo = input("Introduce el nombre del archivo .pcapng (debe estar en el mismo directorio): ")
+    print("== Análisis de Captura ICMP - Reconstrucción de Mensaje ==")
+    nombre_archivo = input("Ingrese el nombre del archivo .pcapng: ").strip()
     
-    # Verificar si el archivo existe y procesarlo
     try:
-        caracteres = reconstruir_mensaje(archivo)
+        caracteres = leer_captura(nombre_archivo)
         if not caracteres:
-            print("No se encontraron paquetes ICMP tipo Echo Request con datos válidos.")
+            print("No se encontraron paquetes ICMP Echo Request válidos con datos suficientes.")
             return
-
-        # Reconstruir el mensaje transmitido (secuencia de caracteres)
-        mensaje = ''.join(caracteres)
-        print(f"Mensaje reconstruido (sin desplazamiento): {mensaje}")
-
-        # Generar todas las combinaciones posibles del mensaje
-        combinaciones = generar_combinaciones(mensaje)
-
-        # Cargar el diccionario en español
-        diccionario = cargar_diccionario_espanol()
-
-        # Mostrar los resultados
-        mostrar_resultados(combinaciones, diccionario)
-    
+        mensaje_original = ''.join(caracteres)
+        combinaciones = generar_combinaciones(mensaje_original)
+        mejor_desplazamiento, mensaje_descifrado = encontrar_mas_probable(combinaciones)
+        
+        print("\n== Combinaciones posibles (Cifrado César) ==")
+        for desplazamiento, texto in combinaciones:
+            if desplazamiento == mejor_desplazamiento:
+                print(f"{Fore.GREEN}[{desplazamiento}] {texto}{Style.RESET_ALL}")
+            else:
+                print(f"[{desplazamiento}] {texto}")
+        
+        print(f"\nMensaje reconstruido: {Fore.GREEN}{mensaje_descifrado}{Style.RESET_ALL}")
+        print(f"Desplazamiento utilizado para decodificar: {mejor_desplazamiento}")
+        
+    except FileNotFoundError as fe:
+        print(f"Error: {fe}")
+    except IOError as ioe:
+        print(f"Error al procesar el archivo: {ioe}")
     except Exception as e:
-        print(f"Se produjo un error: {e}")
+        print(f"Ocurrió un error inesperado: {e}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
